@@ -236,6 +236,7 @@ export function WeixinSettings({ onOpenCloudServices }: { onOpenCloudServices?: 
             const imgUrl = await resolveQrImage(qr.qrcode_img_content);
             setQrImgUrl(imgUrl);
             setQrStatus("wait");
+            let pollBaseUrl: string | undefined;
 
             // 开始轮询扫码状态
             qrAbort.current?.abort();
@@ -247,8 +248,13 @@ export function WeixinSettings({ onOpenCloudServices }: { onOpenCloudServices?: 
                 if (ctrl.signal.aborted) break;
 
                 try {
-                    const status = await pollQrCodeStatus(qr.qrcode);
+                    const status = await pollQrCodeStatus(qr.qrcode, pollBaseUrl);
                     setQrStatus(status.status);
+
+                    if (status.status === "scaned_but_redirect" && status.redirect_host) {
+                        pollBaseUrl = `https://${status.redirect_host}`;
+                        continue;
+                    }
 
                     if (status.status === "confirmed" && status.bot_token) {
                         // 登录成功！保存 bot 配置
@@ -256,12 +262,25 @@ export function WeixinSettings({ onOpenCloudServices }: { onOpenCloudServices?: 
                         addExclusiveWeixinBot({
                             characterId: newCharacterId,
                             botToken: status.bot_token,
+                            baseUrl: status.baseurl || pollBaseUrl,
+                            ilinkBotId: status.ilink_bot_id,
+                            ilinkUserId: status.ilink_user_id,
                             enabled: true,
                             nickname: char?.name,
                         });
                         setBots(loadWeixinBots());
                         notifyChange();
                         setAddStep("done");
+                        return;
+                    }
+
+                    if (status.status === "need_verifycode") {
+                        setAddError("微信要求配对码验证，请关闭后重新扫码，并按微信页面提示输入数字。");
+                    }
+
+                    if (status.status === "verify_code_blocked") {
+                        setAddError("配对码错误次数过多，请稍后重新扫码。");
+                        setAddStep("select-character");
                         return;
                     }
 

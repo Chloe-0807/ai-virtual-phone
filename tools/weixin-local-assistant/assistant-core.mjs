@@ -23,6 +23,8 @@ const WEIXIN_SHORTCUT_IMAGE_MARKER = "__FLOAT_WEIXIN_SHORTCUT_IMAGE__";
 // 既不知道图回没回来，也不知道自己为什么看不见。
 const SHORTCUT_VISION_OFF_NOTE = "（系统记录：未配置或未启用图像识别，本轮回传的图片没有交给你；请结合上一条的文字内容回应。）";
 const ILINK_BASE = "https://ilinkai.weixin.qq.com";
+const ILINK_APP_ID = "bot";
+const ILINK_APP_CLIENT_VERSION = "65538";
 const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const BASE_INFO = { channel_version: "1.0.2" };
 // 锁 TTL 必须远小于「函数被平台掐掉后到下次可重试」的可接受等待：
@@ -75,6 +77,7 @@ export async function pollOnce(env, targetBotId, options = {}) {
       runtime.bot?.botToken,
       { get_updates_buf: state.getUpdatesBuf || "", base_info: BASE_INFO },
       "POST",
+      runtime.bot?.baseUrl,
     );
 
     const messages = Array.isArray(data.msgs) ? data.msgs : [];
@@ -310,7 +313,7 @@ async function autoReplyPendingMessages(env, runtime, options = {}) {
   }
 
   const latest = pending[pending.length - 1].message;
-  const stopTyping = await startIlinkTyping(runtime.bot?.botToken, latest.raw);
+  const stopTyping = await startIlinkTyping(runtime.bot, latest.raw);
   try {
     const generation = await generateReply(env, runtime, cloudMessages, pending.map(item => item.message));
     const shortcutRequest = extractWeixinShortcutRequest(generation.text, generation.shortcutActions);
@@ -363,7 +366,7 @@ async function autoReplyPendingMessages(env, runtime, options = {}) {
       if (i > 0) await sleep(600);
       try {
         const item = replyItems[i];
-        const sendResult = await sendLocalReplyItem(runtime.bot?.botToken, latest.raw, item);
+        const sendResult = await sendLocalReplyItem(runtime.bot, latest.raw, item);
         sendResults.push(sendResult);
         if (sendResults.length === 1) await markPendingReplied();
       } catch (err) {
@@ -1672,23 +1675,27 @@ function cleanWeixinDisplayText(text) {
     .trim();
 }
 
-async function sendLocalReplyItem(botToken, raw, item) {
+async function sendLocalReplyItem(bot, raw, item) {
+  const botToken = bot?.botToken;
+  const baseUrl = bot?.baseUrl;
   if (item.kind === "image" && item.imageDataUrl) {
-    return sendIlinkImageMessage(botToken, raw, item.imageDataUrl);
+    return sendIlinkImageMessage(botToken, raw, item.imageDataUrl, baseUrl);
   }
   if (item.kind === "voice" && item.audioDataUrl) {
-    return sendIlinkVoiceMessage(botToken, raw, item.audioDataUrl, item.duration);
+    return sendIlinkVoiceMessage(botToken, raw, item.audioDataUrl, item.duration, baseUrl);
   }
   if (item.kind === "voice" && item.fallbackImageDataUrl) {
-    return sendIlinkImageMessage(botToken, raw, item.fallbackImageDataUrl);
+    return sendIlinkImageMessage(botToken, raw, item.fallbackImageDataUrl, baseUrl);
   }
   if (item.kind === "file" && item.fileDataUrl) {
-    return sendIlinkFileMessage(botToken, raw, item.fileDataUrl, item.fileName || "file.bin");
+    return sendIlinkFileMessage(botToken, raw, item.fileDataUrl, item.fileName || "file.bin", baseUrl);
   }
-  return sendIlinkTextMessage(botToken, raw, item.text || "");
+  return sendIlinkTextMessage(botToken, raw, item.text || "", baseUrl);
 }
 
-async function startIlinkTyping(botToken, raw) {
+async function startIlinkTyping(bot, raw) {
+  const botToken = bot?.botToken;
+  const baseUrl = bot?.baseUrl;
   const toUserId = raw?.from_user_id;
   const contextToken = raw?.context_token;
   if (!botToken || !toUserId || !contextToken) return async () => {};
@@ -1699,7 +1706,7 @@ async function startIlinkTyping(botToken, raw) {
       ilink_user_id: toUserId,
       context_token: contextToken,
       base_info: BASE_INFO,
-    });
+    }, "POST", baseUrl);
     typingTicket = typeof cfg?.typing_ticket === "string" ? cfg.typing_ticket : "";
   } catch {
     return async () => {};
@@ -1712,7 +1719,7 @@ async function startIlinkTyping(botToken, raw) {
     typing_ticket: typingTicket,
     status,
     base_info: BASE_INFO,
-  }).catch(() => {});
+  }, "POST", baseUrl).catch(() => {});
 
   await sendTyping(1);
   const timer = setInterval(() => {
@@ -1726,7 +1733,7 @@ async function startIlinkTyping(botToken, raw) {
   };
 }
 
-async function sendIlinkTextMessage(botToken, raw, text) {
+async function sendIlinkTextMessage(botToken, raw, text, baseUrl) {
   const toUserId = raw?.from_user_id;
   const contextToken = raw?.context_token;
   if (!toUserId || !contextToken) throw new Error("missing_weixin_reply_target");
@@ -1746,14 +1753,15 @@ async function sendIlinkTextMessage(botToken, raw, text) {
       base_info: BASE_INFO,
     },
     "POST",
+    baseUrl,
   );
 }
 
-async function sendIlinkImageMessage(botToken, raw, imageDataUrl) {
+async function sendIlinkImageMessage(botToken, raw, imageDataUrl, baseUrl) {
   const toUserId = raw?.from_user_id;
   const contextToken = raw?.context_token;
   if (!toUserId || !contextToken) throw new Error("missing_weixin_reply_target");
-  const upload = await uploadImageToCdn(botToken, toUserId, await imageRefToBuffer(imageDataUrl));
+  const upload = await uploadImageToCdn(botToken, toUserId, await imageRefToBuffer(imageDataUrl), baseUrl);
   return callIlinkJson("/ilink/bot/sendmessage", botToken, {
     msg: {
       from_user_id: "",
@@ -1771,15 +1779,15 @@ async function sendIlinkImageMessage(botToken, raw, imageDataUrl) {
       }],
     },
     base_info: BASE_INFO,
-  }, "POST");
+  }, "POST", baseUrl);
 }
 
-async function sendIlinkVoiceMessage(botToken, raw, audioDataUrl, duration) {
+async function sendIlinkVoiceMessage(botToken, raw, audioDataUrl, duration, baseUrl) {
   const toUserId = raw?.from_user_id;
   const contextToken = raw?.context_token;
   if (!toUserId || !contextToken) throw new Error("missing_weixin_reply_target");
   const { audio } = audioDataUrlToBuffer(audioDataUrl);
-  const upload = await uploadMediaToCdn(botToken, toUserId, audio, 3);
+  const upload = await uploadMediaToCdn(botToken, toUserId, audio, 3, {}, baseUrl);
   return callIlinkJson("/ilink/bot/sendmessage", botToken, {
     msg: {
       from_user_id: "",
@@ -1800,15 +1808,15 @@ async function sendIlinkVoiceMessage(botToken, raw, audioDataUrl, duration) {
       }],
     },
     base_info: BASE_INFO,
-  }, "POST");
+  }, "POST", baseUrl);
 }
 
-async function sendIlinkFileMessage(botToken, raw, fileDataUrl, fileName) {
+async function sendIlinkFileMessage(botToken, raw, fileDataUrl, fileName, baseUrl) {
   const toUserId = raw?.from_user_id;
   const contextToken = raw?.context_token;
   if (!toUserId || !contextToken) throw new Error("missing_weixin_reply_target");
   const fileBuffer = genericDataUrlToBuffer(fileDataUrl);
-  const upload = await uploadMediaToCdn(botToken, toUserId, fileBuffer, 3);
+  const upload = await uploadMediaToCdn(botToken, toUserId, fileBuffer, 3, {}, baseUrl);
   const rawExt = fileName.split(".").pop() || "";
   const ext = /^[a-zA-Z0-9]{2,5}$/.test(rawExt) ? rawExt : "bin";
   return callIlinkJson("/ilink/bot/sendmessage", botToken, {
@@ -1830,10 +1838,10 @@ async function sendIlinkFileMessage(botToken, raw, fileDataUrl, fileName) {
       }],
     },
     base_info: BASE_INFO,
-  }, "POST");
+  }, "POST", baseUrl);
 }
 
-async function uploadMediaToCdn(botToken, toUserId, media, mediaType, options = {}) {
+async function uploadMediaToCdn(botToken, toUserId, media, mediaType, options = {}, baseUrl) {
   const rawsize = media.length;
   const filesize = aesEcbPaddedSize(rawsize);
   const filekey = randomBytes(16).toString("hex");
@@ -1848,7 +1856,7 @@ async function uploadMediaToCdn(botToken, toUserId, media, mediaType, options = 
     aeskey: aeskey.toString("hex"),
     ...(options.noNeedThumb ? { no_need_thumb: true } : {}),
     base_info: BASE_INFO,
-  });
+  }, "POST", baseUrl);
   if (!uploadData.upload_param) throw new Error("missing_upload_param");
 
   const ciphertext = encryptAesEcb(media, aeskey);
@@ -1865,14 +1873,24 @@ async function uploadMediaToCdn(botToken, toUserId, media, mediaType, options = 
   return { filesize, aeskey, downloadParam };
 }
 
-async function uploadImageToCdn(botToken, toUserId, image) {
-  return uploadMediaToCdn(botToken, toUserId, image, 1, { noNeedThumb: true });
+async function uploadImageToCdn(botToken, toUserId, image, baseUrl) {
+  return uploadMediaToCdn(botToken, toUserId, image, 1, { noNeedThumb: true }, baseUrl);
 }
 
-async function callIlinkJson(path, botToken, body, method = "POST") {
+function normalizeIlinkBaseUrl(value) {
+  if (!value) return ILINK_BASE;
+  const url = new URL(String(value).startsWith("http") ? value : `https://${value}`);
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || !(host === "ilinkai.weixin.qq.com" || host.endsWith(".weixin.qq.com"))) {
+    throw new Error("invalid_ilink_base_url");
+  }
+  return `${url.protocol}//${url.host}`;
+}
+
+async function callIlinkJson(path, botToken, body, method = "POST", baseUrl) {
   if (!path || typeof path !== "string") throw new Error("missing_ilink_path");
   const fetchMethod = method === "GET" ? "GET" : "POST";
-  const res = await fetch(`${ILINK_BASE}${path}`, {
+  const res = await fetch(`${normalizeIlinkBaseUrl(baseUrl)}${path}`, {
     method: fetchMethod,
     headers: makeIlinkHeaders(botToken),
     body: fetchMethod === "POST" ? JSON.stringify(body ?? {}) : undefined,
@@ -1887,7 +1905,7 @@ async function callIlinkJson(path, botToken, body, method = "POST") {
 }
 
 function makeIlinkHeaders(botToken) {
-  const headers = { "Content-Type": "application/json", "iLink-App-ClientVersion": "1" };
+  const headers = { "Content-Type": "application/json", "iLink-App-Id": ILINK_APP_ID, "iLink-App-ClientVersion": ILINK_APP_CLIENT_VERSION };
   if (botToken) {
     headers.Authorization = `Bearer ${botToken}`;
     headers.AuthorizationType = "ilink_bot_token";

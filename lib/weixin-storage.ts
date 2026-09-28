@@ -8,6 +8,9 @@ export type WeixinBotConfig = {
     id: string;           // 唯一ID
     characterId: string;  // 绑定的角色ID
     botToken: string;     // iLink bot_token（格式：wc_live_xxx）
+    baseUrl?: string;     // 登录返回的地区 API 地址（部分微信账号必须使用）
+    ilinkBotId?: string;  // iLink Bot 账号 ID
+    ilinkUserId?: string; // 扫码微信用户 ID
     enabled: boolean;     // 是否启用
     nickname?: string;    // 显示名（默认用角色名）
     addedAt: string;      // ISO 日期

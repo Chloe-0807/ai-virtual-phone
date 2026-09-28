@@ -19,6 +19,8 @@ export const maxDuration = 25;
 const WEIXIN_POLL_PAUSED = true;
 
 const ILINK_BASE = "https://ilinkai.weixin.qq.com";
+const ILINK_APP_ID = "bot";
+const ILINK_APP_CLIENT_VERSION = "65538"; // 1.0.2 -> 0x00010002
 const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const BASE_INFO = { channel_version: "1.0.2" };
 
@@ -26,12 +28,14 @@ type ProxyRequest = {
     path: string;                        // iLink 路径，如 "/ilink/bot/getupdates"
     method?: "GET" | "POST";
     botToken?: string;                   // Bearer token（登录接口不需要）
+    baseUrl?: string;                    // 登录返回的地区 API 地址
     body?: unknown;                      // 转发给 iLink 的请求体
 };
 
 type SendImageRequest = {
     action: "send_image";
     botToken: string;
+    baseUrl?: string;
     toUserId: string;
     contextToken: string;
     imageDataUrl: string;
@@ -40,6 +44,7 @@ type SendImageRequest = {
 type SendVoiceRequest = {
     action: "send_voice";
     botToken: string;
+    baseUrl?: string;
     toUserId: string;
     contextToken: string;
     audioDataUrl: string;
@@ -50,6 +55,7 @@ type SendVoiceRequest = {
 type SendFileRequest = {
     action: "send_file";
     botToken: string;
+    baseUrl?: string;
     toUserId: string;
     contextToken: string;
     fileDataUrl: string;
@@ -158,7 +164,8 @@ function fetchViaProxy(
 function makeIlinkHeaders(botToken?: string): Record<string, string> {
     const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        "iLink-App-ClientVersion": "1",
+        "iLink-App-Id": ILINK_APP_ID,
+        "iLink-App-ClientVersion": ILINK_APP_CLIENT_VERSION,
     };
 
     if (botToken) {
@@ -171,9 +178,19 @@ function makeIlinkHeaders(botToken?: string): Record<string, string> {
     return headers;
 }
 
-async function callIlinkJson<T>(path: string, botToken: string | undefined, body: unknown, timeoutMs = 24000): Promise<T> {
+function normalizeIlinkBaseUrl(value?: string): string {
+    if (!value) return ILINK_BASE;
+    const url = new URL(value.startsWith("http") ? value : `https://${value}`);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || !(host === "ilinkai.weixin.qq.com" || host.endsWith(".weixin.qq.com"))) {
+        throw new Error("invalid_ilink_base_url");
+    }
+    return `${url.protocol}//${url.host}`;
+}
+
+async function callIlinkJson<T>(path: string, botToken: string | undefined, body: unknown, timeoutMs = 24000, baseUrl?: string): Promise<T> {
     const upstream = await fetchViaProxy(
-        `${ILINK_BASE}${path}`,
+        `${normalizeIlinkBaseUrl(baseUrl)}${path}`,
         {
             method: "POST",
             headers: makeIlinkHeaders(botToken),
@@ -224,6 +241,7 @@ async function uploadMediaToCdn(
     media: Buffer,
     mediaType: number,
     options?: { noNeedThumb?: boolean },
+    baseUrl?: string,
 ): Promise<{
     filesize: number;
     aeskey: Buffer;
@@ -248,6 +266,8 @@ async function uploadMediaToCdn(
             ...(options?.noNeedThumb ? { no_need_thumb: true } : {}),
             base_info: BASE_INFO,
         },
+        24000,
+        baseUrl,
     );
 
     if (!uploadData.upload_param) throw new Error("missing_upload_param");
@@ -274,13 +294,13 @@ async function uploadMediaToCdn(
     return { filesize, aeskey, downloadParam };
 }
 
-async function uploadImageToCdn(botToken: string, toUserId: string, image: Buffer) {
-    return uploadMediaToCdn(botToken, toUserId, image, 1, { noNeedThumb: true });
+async function uploadImageToCdn(botToken: string, toUserId: string, image: Buffer, baseUrl?: string) {
+    return uploadMediaToCdn(botToken, toUserId, image, 1, { noNeedThumb: true }, baseUrl);
 }
 
 async function handleSendImage(payload: SendImageRequest) {
     const image = imageDataUrlToBuffer(payload.imageDataUrl);
-    const upload = await uploadImageToCdn(payload.botToken, payload.toUserId, image);
+    const upload = await uploadImageToCdn(payload.botToken, payload.toUserId, image, payload.baseUrl);
 
     const data = await callIlinkJson<{ ret?: number; errmsg?: string }>(
         "/ilink/bot/sendmessage",
@@ -309,6 +329,8 @@ async function handleSendImage(payload: SendImageRequest) {
             },
             base_info: BASE_INFO,
         },
+        24000,
+        payload.baseUrl,
     );
 
     if (data.ret !== undefined && data.ret !== 0) {
@@ -320,7 +342,7 @@ async function handleSendImage(payload: SendImageRequest) {
 
 async function handleSendVoice(payload: SendVoiceRequest) {
     const { audio } = audioDataUrlToBuffer(payload.audioDataUrl);
-    const upload = await uploadMediaToCdn(payload.botToken, payload.toUserId, audio, 3);
+    const upload = await uploadMediaToCdn(payload.botToken, payload.toUserId, audio, 3, {}, payload.baseUrl);
 
     const data = await callIlinkJson<{ ret?: number; errmsg?: string }>(
         "/ilink/bot/sendmessage",
@@ -351,6 +373,8 @@ async function handleSendVoice(payload: SendVoiceRequest) {
             },
             base_info: BASE_INFO,
         },
+        24000,
+        payload.baseUrl,
     );
 
     if (data.ret !== undefined && data.ret !== 0) {
@@ -368,7 +392,7 @@ function genericDataUrlToBuffer(dataUrl: string): Buffer {
 
 async function handleSendFile(payload: SendFileRequest) {
     const fileBuffer = genericDataUrlToBuffer(payload.fileDataUrl);
-    const upload = await uploadMediaToCdn(payload.botToken, payload.toUserId, fileBuffer, 3);
+    const upload = await uploadMediaToCdn(payload.botToken, payload.toUserId, fileBuffer, 3, {}, payload.baseUrl);
     const rawExt = payload.fileName.split(".").pop() || "";
     const ext = /^[a-zA-Z0-9]{2,5}$/.test(rawExt) ? rawExt : "bin";
 
@@ -401,6 +425,8 @@ async function handleSendFile(payload: SendFileRequest) {
             },
             base_info: BASE_INFO,
         },
+        24000,
+        payload.baseUrl,
     );
 
     if (data.ret !== undefined && data.ret !== 0) {
@@ -458,15 +484,24 @@ export async function POST(request: Request) {
         }
     }
 
-    const { path, method = "POST", botToken, body } = payload as ProxyRequest;
+    const { path, method = "POST", botToken, baseUrl, body } = payload as ProxyRequest;
 
     if (!path) {
         return NextResponse.json({ error: "missing_path" }, { status: 400 });
     }
 
     const headers = makeIlinkHeaders(botToken);
+    if (!botToken && path.includes("/get_bot_qrcode")) {
+        headers.AuthorizationType = "ilink_bot_token";
+        headers["X-WECHAT-UIN"] = Buffer.from(String(randomBytes(4).readUInt32BE(0))).toString("base64");
+    }
 
-    const url = `${ILINK_BASE}${path}`;
+    let url: string;
+    try {
+        url = `${normalizeIlinkBaseUrl(baseUrl)}${path}`;
+    } catch {
+        return NextResponse.json({ error: "invalid_base_url" }, { status: 400 });
+    }
     const fetchMethod = method === "GET" ? "GET" : "POST";
     const hasBody = body !== undefined && body !== null
         && !(typeof body === "object" && Object.keys(body as object).length === 0);
